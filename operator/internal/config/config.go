@@ -19,6 +19,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -33,7 +34,27 @@ type OperatorConfig struct {
 	OIDCIssuerURL       string // LLM_OIDC_ISSUER_URL (required)
 	OIDCGroupsClaim     string // LLM_OIDC_GROUPS_CLAIM (default: "groups")
 	OIDCAudience        string // LLM_OIDC_AUDIENCE (optional, empty string means no audience check)
-	DefaultServingImage string // LLM_DEFAULT_SERVING_IMAGE (default: "ghcr.io/llm-d/llm-d-cuda:v0.7.0")
+	// OIDCJWKSURI, when non-empty, overrides the URL Envoy fetches JWKS
+	// from. The default (<issuer>/protocol/openid-connect/certs) requires
+	// Envoy to trust the issuer's certificate; on private-CA deployments
+	// that fetch fails ("Jwks remote fetch is failed") and every token is
+	// rejected, because Envoy's JWKS fetcher only trusts public roots.
+	// Point this at the in-cluster Keycloak Service over plain HTTP
+	// (together with the backend ref below) to bypass TLS entirely while
+	// OIDCIssuerURL keeps validating the external `iss` claim.
+	OIDCJWKSURI string // LLM_OIDC_JWKS_URI (optional; default <issuer>/protocol/openid-connect/certs)
+	// OIDCJWKSBackendService/Namespace/Port, when Service is non-empty,
+	// render a remoteJWKS.backendRefs entry so Envoy routes the JWKS fetch
+	// to that Kubernetes Service instead of resolving the URI host through
+	// external DNS. Required for an http:// OIDCJWKSURI to work: without a
+	// backendRef, Envoy Gateway builds the JWKS cluster from the URI alone.
+	// A cross-namespace reference additionally needs a ReferenceGrant in
+	// the Service's namespace (from: SecurityPolicy in the operator
+	// namespace); the Helm chart renders one when configured.
+	OIDCJWKSBackendService   string // LLM_OIDC_JWKS_BACKEND_SERVICE (optional)
+	OIDCJWKSBackendNamespace string // LLM_OIDC_JWKS_BACKEND_NAMESPACE (optional; empty = the SecurityPolicy's namespace)
+	OIDCJWKSBackendPort      int32  // LLM_OIDC_JWKS_BACKEND_PORT (required when the backend Service is set)
+	DefaultServingImage      string // LLM_DEFAULT_SERVING_IMAGE (default: "ghcr.io/llm-d/llm-d-cuda:v0.7.0")
 	// DefaultEPPImage is the llm-d-inference-scheduler (Endpoint Picker)
 	// image used for every model's EPP Deployment. Configurable so it can
 	// be re-pinned (or pointed at a mirrored/air-gapped registry) without
@@ -121,22 +142,36 @@ func LoadFromEnv() (*OperatorConfig, error) {
 	}
 
 	cfg := &OperatorConfig{
-		BaseDomain:              require("LLM_BASE_DOMAIN"),
-		ExternalGatewayName:     require("LLM_EXTERNAL_GATEWAY_NAME"),
-		ExternalGatewayNS:       getEnvOrDefault("LLM_EXTERNAL_GATEWAY_NAMESPACE", "envoy-gateway-system"),
-		InternalGatewayName:     require("LLM_INTERNAL_GATEWAY_NAME"),
-		InternalGatewayNS:       getEnvOrDefault("LLM_INTERNAL_GATEWAY_NAMESPACE", "envoy-gateway-system"),
-		OIDCIssuerURL:           require("LLM_OIDC_ISSUER_URL"),
-		OIDCGroupsClaim:         getEnvOrDefault("LLM_OIDC_GROUPS_CLAIM", "groups"),
-		OIDCAudience:            os.Getenv("LLM_OIDC_AUDIENCE"),
-		DefaultServingImage:     getEnvOrDefault("LLM_DEFAULT_SERVING_IMAGE", "ghcr.io/llm-d/llm-d-cuda:v0.7.0"),
-		DefaultEPPImage:         getEnvOrDefault("LLM_DEFAULT_EPP_IMAGE", "ghcr.io/llm-d/llm-d-inference-scheduler:v0.8.0"),
-		DefaultStorageClassName: os.Getenv("LLM_DEFAULT_STORAGE_CLASS_NAME"),
-		APIKeysNamespace:        os.Getenv("LLM_API_KEYS_NAMESPACE"),
-		OperatorNamespace:       os.Getenv("POD_NAMESPACE"),
-		ClusterIssuerName:       getEnvOrDefault("LLM_CLUSTER_ISSUER_NAME", "letsencrypt-production"),
-		TLSSecretName:           os.Getenv("LLM_TLS_SECRET_NAME"),
-		ManageSharedListeners:   getEnvBool("LLM_MANAGE_SHARED_LISTENERS", true),
+		BaseDomain:               require("LLM_BASE_DOMAIN"),
+		ExternalGatewayName:      require("LLM_EXTERNAL_GATEWAY_NAME"),
+		ExternalGatewayNS:        getEnvOrDefault("LLM_EXTERNAL_GATEWAY_NAMESPACE", "envoy-gateway-system"),
+		InternalGatewayName:      require("LLM_INTERNAL_GATEWAY_NAME"),
+		InternalGatewayNS:        getEnvOrDefault("LLM_INTERNAL_GATEWAY_NAMESPACE", "envoy-gateway-system"),
+		OIDCIssuerURL:            require("LLM_OIDC_ISSUER_URL"),
+		OIDCGroupsClaim:          getEnvOrDefault("LLM_OIDC_GROUPS_CLAIM", "groups"),
+		OIDCAudience:             os.Getenv("LLM_OIDC_AUDIENCE"),
+		OIDCJWKSURI:              os.Getenv("LLM_OIDC_JWKS_URI"),
+		OIDCJWKSBackendService:   os.Getenv("LLM_OIDC_JWKS_BACKEND_SERVICE"),
+		OIDCJWKSBackendNamespace: os.Getenv("LLM_OIDC_JWKS_BACKEND_NAMESPACE"),
+		DefaultServingImage:      getEnvOrDefault("LLM_DEFAULT_SERVING_IMAGE", "ghcr.io/llm-d/llm-d-cuda:v0.7.0"),
+		DefaultEPPImage:          getEnvOrDefault("LLM_DEFAULT_EPP_IMAGE", "ghcr.io/llm-d/llm-d-inference-scheduler:v0.8.0"),
+		DefaultStorageClassName:  os.Getenv("LLM_DEFAULT_STORAGE_CLASS_NAME"),
+		APIKeysNamespace:         os.Getenv("LLM_API_KEYS_NAMESPACE"),
+		OperatorNamespace:        os.Getenv("POD_NAMESPACE"),
+		ClusterIssuerName:        getEnvOrDefault("LLM_CLUSTER_ISSUER_NAME", "letsencrypt-production"),
+		TLSSecretName:            os.Getenv("LLM_TLS_SECRET_NAME"),
+		ManageSharedListeners:    getEnvBool("LLM_MANAGE_SHARED_LISTENERS", true),
+	}
+
+	if v := os.Getenv("LLM_OIDC_JWKS_BACKEND_PORT"); v != "" {
+		port, err := strconv.ParseInt(v, 10, 32)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("LLM_OIDC_JWKS_BACKEND_PORT must be a port number between 1 and 65535, got %q", v)
+		}
+		cfg.OIDCJWKSBackendPort = int32(port)
+	}
+	if cfg.OIDCJWKSBackendService != "" && cfg.OIDCJWKSBackendPort == 0 {
+		missing = append(missing, "LLM_OIDC_JWKS_BACKEND_PORT")
 	}
 
 	if len(missing) > 0 {

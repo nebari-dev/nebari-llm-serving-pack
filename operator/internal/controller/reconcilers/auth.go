@@ -244,15 +244,40 @@ func buildInternalSecurityPolicy(model *llmv1alpha1.LLMModel, cfg *config.Operat
 // the access policy is not public. Shared between the LLMModel and
 // PassthroughModel reconcilers.
 func buildJWTSecurityPolicy(name, namespace string, labels map[string]interface{}, routeName string, cfg *config.OperatorConfig, public bool, groups []string) *unstructured.Unstructured {
+	// Keycloak-specific JWKS path. The rest of the pack assumes Keycloak
+	// (issuer URL convention, group-membership mapper, etc.) and Keycloak
+	// does not serve JWKS at /.well-known/jwks.json. See issue #61.
+	jwksURI := cfg.OIDCJWKSURI
+	if jwksURI == "" {
+		jwksURI = cfg.OIDCIssuerURL + "/protocol/openid-connect/certs"
+	}
+	remoteJWKS := map[string]interface{}{
+		"uri": jwksURI,
+	}
+	// With a backend Service configured, Envoy routes the JWKS fetch to
+	// that Service instead of resolving the URI host through DNS and
+	// trusting its certificate. This is the private-CA escape hatch: an
+	// http:// in-cluster URI plus a backendRef needs no trust material at
+	// all, while the issuer above still validates the external `iss`
+	// claim. Cross-namespace refs need a ReferenceGrant in the Service's
+	// namespace (the chart renders one).
+	if cfg.OIDCJWKSBackendService != "" {
+		backendRef := map[string]interface{}{
+			"group": "",
+			"kind":  "Service",
+			"name":  cfg.OIDCJWKSBackendService,
+			"port":  int64(cfg.OIDCJWKSBackendPort),
+		}
+		if cfg.OIDCJWKSBackendNamespace != "" {
+			backendRef["namespace"] = cfg.OIDCJWKSBackendNamespace
+		}
+		remoteJWKS["backendRefs"] = []interface{}{backendRef}
+	}
+
 	provider := map[string]interface{}{
-		"name":   "oidc",
-		"issuer": cfg.OIDCIssuerURL,
-		// Keycloak-specific JWKS path. The rest of the pack assumes Keycloak
-		// (issuer URL convention, group-membership mapper, etc.) and Keycloak
-		// does not serve JWKS at /.well-known/jwks.json. See issue #61.
-		"remoteJWKS": map[string]interface{}{
-			"uri": cfg.OIDCIssuerURL + "/protocol/openid-connect/certs",
-		},
+		"name":       "oidc",
+		"issuer":     cfg.OIDCIssuerURL,
+		"remoteJWKS": remoteJWKS,
 		"claimToHeaders": []interface{}{
 			map[string]interface{}{
 				"header": "X-Auth-Groups",

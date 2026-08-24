@@ -1,0 +1,27 @@
+{{- /*
+Cross-namespace remoteJWKS backendRefs need a ReferenceGrant in the target
+Service's namespace: the JWT SecurityPolicies the operator creates live in
+the release namespace (single-namespace model, #59), so when the JWKS
+backend Service is elsewhere (typically Keycloak's namespace), Envoy Gateway
+rejects the reference without this grant. Rendered only when a
+cross-namespace backendRef is configured.
+*/}}
+{{- $ref := .Values.auth.oidc.jwks.backendRef }}
+{{- if and $ref.name $ref.namespace (ne $ref.namespace .Release.Namespace) }}
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ include "nebari-llm-serving.fullname" . }}-jwks-from-{{ .Release.Namespace }}
+  namespace: {{ $ref.namespace }}
+  labels:
+    {{- include "nebari-llm-serving.labels" . | nindent 4 }}
+spec:
+  from:
+    - group: gateway.envoyproxy.io
+      kind: SecurityPolicy
+      namespace: {{ .Release.Namespace }}
+  to:
+    - group: ""
+      kind: Service
+      name: {{ $ref.name }}
+{{- end }}

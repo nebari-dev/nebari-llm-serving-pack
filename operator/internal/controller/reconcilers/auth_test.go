@@ -14,6 +14,9 @@ const (
 	testAuthModelName = "my-model"
 	testAuthNamespace = "test-ns"
 	testAuthSAName    = "nebari-llm-operator"
+	// testJWKSBackendService is the in-cluster Keycloak Service the JWKS
+	// backendRef test cases point at.
+	testJWKSBackendService = "keycloak-http"
 )
 
 func defaultAuthModel() *llmv1alpha1.LLMModel {
@@ -438,6 +441,88 @@ func TestBuildAuthResources(t *testing.T) { //nolint:gocyclo // table-driven tes
 				if remoteJWKS["uri"] != expectedURI {
 					t.Errorf("expected JWKS URI %q, got %q", expectedURI, remoteJWKS["uri"])
 				}
+				if _, ok := remoteJWKS["backendRefs"]; ok {
+					t.Error("expected no backendRefs when no JWKS backend Service is configured")
+				}
+			},
+		},
+		{
+			name:  "Internal SecurityPolicy: JWKS URI override without backend keeps direct fetch",
+			model: defaultAuthModel(),
+			cfg: func() *config.OperatorConfig {
+				cfg := defaultAuthConfig()
+				cfg.OIDCJWKSURI = "https://jwks.example.com/keys"
+				return cfg
+			}(),
+			check: func(t *testing.T, result *AuthResources, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				provider := internalJWTProvider(t, result)
+				if provider["issuer"] != "https://oidc.example.com" {
+					t.Errorf("expected issuer https://oidc.example.com, got %q", provider["issuer"])
+				}
+				remoteJWKS := provider["remoteJWKS"].(map[string]interface{})
+				if remoteJWKS["uri"] != "https://jwks.example.com/keys" {
+					t.Errorf("expected overridden JWKS URI, got %q", remoteJWKS["uri"])
+				}
+				if _, ok := remoteJWKS["backendRefs"]; ok {
+					t.Error("expected no backendRefs when no JWKS backend Service is configured")
+				}
+			},
+		},
+		{
+			name:  "Internal SecurityPolicy: JWKS backend Service renders backendRefs",
+			model: defaultAuthModel(),
+			cfg: func() *config.OperatorConfig {
+				cfg := defaultAuthConfig()
+				cfg.OIDCJWKSURI = "http://keycloak-http.keycloak.svc.cluster.local:8080/realms/nebari/protocol/openid-connect/certs"
+				cfg.OIDCJWKSBackendService = testJWKSBackendService
+				cfg.OIDCJWKSBackendNamespace = "keycloak"
+				cfg.OIDCJWKSBackendPort = 8080
+				return cfg
+			}(),
+			check: func(t *testing.T, result *AuthResources, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				provider := internalJWTProvider(t, result)
+				remoteJWKS := provider["remoteJWKS"].(map[string]interface{})
+				backendRefs, ok := remoteJWKS["backendRefs"].([]interface{})
+				if !ok || len(backendRefs) != 1 {
+					t.Fatalf("expected exactly 1 backendRef, got %#v", remoteJWKS["backendRefs"])
+				}
+				ref := backendRefs[0].(map[string]interface{})
+				if ref["group"] != "" || ref["kind"] != "Service" {
+					t.Errorf("expected core Service backendRef, got group=%q kind=%q", ref["group"], ref["kind"])
+				}
+				if ref["name"] != testJWKSBackendService || ref["namespace"] != "keycloak" {
+					t.Errorf("expected keycloak-http/keycloak backendRef, got name=%q namespace=%q", ref["name"], ref["namespace"])
+				}
+				if ref["port"] != int64(8080) {
+					t.Errorf("expected port 8080, got %#v", ref["port"])
+				}
+			},
+		},
+		{
+			name:  "Internal SecurityPolicy: JWKS backend without namespace omits the namespace field",
+			model: defaultAuthModel(),
+			cfg: func() *config.OperatorConfig {
+				cfg := defaultAuthConfig()
+				cfg.OIDCJWKSBackendService = testJWKSBackendService
+				cfg.OIDCJWKSBackendPort = 8080
+				return cfg
+			}(),
+			check: func(t *testing.T, result *AuthResources, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				provider := internalJWTProvider(t, result)
+				remoteJWKS := provider["remoteJWKS"].(map[string]interface{})
+				ref := remoteJWKS["backendRefs"].([]interface{})[0].(map[string]interface{})
+				if _, ok := ref["namespace"]; ok {
+					t.Error("expected namespace to be omitted for a same-namespace backendRef")
+				}
 			},
 		},
 		{
@@ -739,4 +824,17 @@ func TestBuildAuthResources(t *testing.T) { //nolint:gocyclo // table-driven tes
 			tt.check(t, result, err)
 		})
 	}
+}
+
+// internalJWTProvider extracts the single JWT provider from the internal
+// SecurityPolicy, failing the test if the policy shape is unexpected.
+func internalJWTProvider(t *testing.T, result *AuthResources) map[string]interface{} {
+	t.Helper()
+	spec := result.InternalSecurityPolicy.Object["spec"].(map[string]interface{})
+	jwt := spec["jwt"].(map[string]interface{})
+	providers := jwt["providers"].([]interface{})
+	if len(providers) != 1 {
+		t.Fatalf("expected 1 JWT provider, got %d", len(providers))
+	}
+	return providers[0].(map[string]interface{})
 }

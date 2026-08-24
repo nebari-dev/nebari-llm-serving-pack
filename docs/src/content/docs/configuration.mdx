@@ -43,6 +43,10 @@ Pass these with `--set key=value` or in a `values.yaml` override file.
 | `auth.oidc.existingSecret` | `""` | Name of the Secret containing the `issuer-url` key. Defaults to `<release-fullname>-oidc-client` when empty. |
 | `auth.oidc.groupsClaim` | `groups` | JWT claim name used to extract group memberships. |
 | `auth.oidc.audience` | `""` | Expected audience value in JWT tokens. |
+| `auth.oidc.jwks.uri` | `""` | Overrides the JWKS fetch URL. Default is `<issuerURL>/protocol/openid-connect/certs`. Use an in-cluster plain-HTTP Keycloak URL (with `backendRef` below) on private-CA deployments, where Envoy cannot verify the external issuer's certificate. |
+| `auth.oidc.jwks.backendRef.name` | `""` | Kubernetes Service Envoy routes the JWKS fetch to (rendered as `remoteJWKS.backendRefs`). Required for an `http://` JWKS URI. |
+| `auth.oidc.jwks.backendRef.namespace` | `""` | Namespace of the JWKS backend Service. When it differs from the release namespace, the chart renders the ReferenceGrant the cross-namespace reference requires. |
+| `auth.oidc.jwks.backendRef.port` | `8080` | Port of the JWKS backend Service. |
 
 ### Envoy AI Gateway
 

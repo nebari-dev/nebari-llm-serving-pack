@@ -54,6 +54,31 @@ auth:
     existingSecret: ""
     groupsClaim: groups
     audience: ""
+    # jwks - where Envoy fetches the JWT signing keys for the internal
+    # (OAuth) endpoint. By default Envoy fetches
+    # <issuerURL>/protocol/openid-connect/certs directly, which requires it
+    # to trust the issuer's TLS certificate; on private-CA / BYO-cert
+    # deployments that fetch fails ("Jwks remote fetch is failed") and every
+    # token is rejected. Set uri to the in-cluster Keycloak Service over
+    # plain HTTP and backendRef to that Service to bypass TLS for the key
+    # fetch while issuerURL keeps validating the token's external `iss`
+    # claim. Example:
+    #   jwks:
+    #     uri: http://keycloak-http.keycloak.svc.cluster.local:8080/realms/nebari/protocol/openid-connect/certs
+    #     backendRef:
+    #       name: keycloak-http
+    #       namespace: keycloak
+    #       port: 8080
+    jwks:
+      uri: ""
+      # backendRef - the Kubernetes Service Envoy routes the JWKS fetch to.
+      # Required for an http:// uri to work. When namespace differs from the
+      # release namespace, the chart also renders the ReferenceGrant that
+      # cross-namespace SecurityPolicy backendRefs require.
+      backendRef:
+        name: ""
+        namespace: ""
+        port: 8080
 
 envoyAIGateway:
   # install: if true, installs the Envoy AI Gateway (not yet implemented)

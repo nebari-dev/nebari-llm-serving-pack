@@ -44,6 +44,24 @@ spec:
             {{- end }}
             - name: LLM_OIDC_GROUPS_CLAIM
               value: {{ .Values.auth.oidc.groupsClaim | quote }}
+            {{- if .Values.auth.oidc.audience }}
+            - name: LLM_OIDC_AUDIENCE
+              value: {{ .Values.auth.oidc.audience | quote }}
+            {{- end }}
+            {{- if .Values.auth.oidc.jwks.uri }}
+            - name: LLM_OIDC_JWKS_URI
+              value: {{ .Values.auth.oidc.jwks.uri | quote }}
+            {{- end }}
+            {{- if .Values.auth.oidc.jwks.backendRef.name }}
+            - name: LLM_OIDC_JWKS_BACKEND_SERVICE
+              value: {{ .Values.auth.oidc.jwks.backendRef.name | quote }}
+            {{- if .Values.auth.oidc.jwks.backendRef.namespace }}
+            - name: LLM_OIDC_JWKS_BACKEND_NAMESPACE
+              value: {{ .Values.auth.oidc.jwks.backendRef.namespace | quote }}
+            {{- end }}
+            - name: LLM_OIDC_JWKS_BACKEND_PORT
+              value: {{ .Values.auth.oidc.jwks.backendRef.port | quote }}
+            {{- end }}
             - name: LLM_DEFAULT_SERVING_IMAGE
               value: {{ .Values.defaults.serving.image | quote }}
             - name: LLM_DEFAULT_EPP_IMAGE
