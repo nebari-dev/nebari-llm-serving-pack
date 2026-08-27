@@ -123,10 +123,37 @@ describe('manifest reconciliation (NIC source of truth)', () => {
     expect(m).toMatch(/targetRevision:\s*v25\.10\.1\b/);
     expect(m).not.toMatch(/v26\.3\.0\b/);
   });
-  it('envoy-ai-gateway.yaml drops the oci:// prefix (NIC form)', () => {
-    const m = readExample('envoy-ai-gateway.yaml');
+  it('ai-gateway-prereqs.yaml drops the oci:// prefix (NIC form)', () => {
+    const m = readExample('ai-gateway-prereqs.yaml');
     expect(m).not.toMatch(/oci:\/\//);
     expect(m).toMatch(/repoURL:\s*docker\.io\/envoyproxy\b/);
+  });
+  it('ai-gateway-prereqs.yaml carries all three prerequisites with nothing to fill in', () => {
+    const m = readExample('ai-gateway-prereqs.yaml');
+    // One file, three Applications: the AI Gateway CRDs, the GIE CRDs, the controller.
+    expect(m).toMatch(/name:\s*envoy-ai-gateway-crds\b/);
+    expect(m).toMatch(/name:\s*gateway-api-inference-extension\b/);
+    expect(m).toMatch(/name:\s*envoy-ai-gateway\b/);
+    // Packs go in nebari-apps; foundational refuses their sources (NIC #481).
+    expect(m).not.toMatch(/project:\s*foundational\b/);
+    expect(m).toMatch(/project:\s*nebari-apps\b/);
+    // The point of the file: applied as-is, so no placeholder may survive.
+    expect(m).not.toMatch(/<[a-z0-9_-]+>/);
+    // The GIE CRDs come from upstream's own kustomize dir, not a hand-authored
+    // one in the user's repo - that is what removed the placeholders.
+    expect(m).toMatch(/repoURL:\s*https:\/\/github\.com\/kubernetes-sigs\/gateway-api-inference-extension\b/);
+    expect(m).toMatch(/path:\s*config\/crd\b/);
+  });
+  it('ai-gateway-prereqs.yaml does not prune the CRD-owning Applications', () => {
+    // Pruning a CRD deletes every CR of that kind cluster-wide, so the two
+    // CRD Applications must stay prune: false while the controller prunes.
+    const docs = readExample('ai-gateway-prereqs.yaml').split(/^---$/m);
+    // Anchored to end of line: a \b after "envoy-ai-gateway" also matches
+    // inside "envoy-ai-gateway-crds", which would pick the wrong document.
+    const appFor = (name) => docs.find((d) => new RegExp(`name: ${name}$`, 'm').test(d));
+    expect(appFor('envoy-ai-gateway-crds')).toMatch(/prune:\s*false\b/);
+    expect(appFor('gateway-api-inference-extension')).toMatch(/prune:\s*false\b/);
+    expect(appFor('envoy-ai-gateway')).toMatch(/prune:\s*true\b/);
   });
   it('installation.md installs the pack from the published OCI chart (0.1.2)', () => {
     const page = readPage('installation.md');

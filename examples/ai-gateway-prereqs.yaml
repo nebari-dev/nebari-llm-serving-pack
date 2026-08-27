@@ -1,0 +1,170 @@
+# AI Gateway prerequisites for the nebari llm-serving-pack.
+#
+# Three ArgoCD Applications, in dependency order:
+#
+#   1. envoy-ai-gateway-crds            AIGatewayRoute, AIServiceBackend,
+#                                       BackendSecurityPolicy, GatewayConfig,
+#                                       MCPRoute
+#   2. gateway-api-inference-extension  InferencePool and friends; the llm-d
+#                                       End-Point Picker looks up InferencePool
+#                                       at startup and crashloops without it
+#   3. envoy-ai-gateway                 the controller: XDS extension server on
+#                                       port 1063 plus the pod-mutating webhook
+#                                       that injects the ai-gateway-extproc
+#                                       sidecar
+#
+# Nothing here is cluster-specific, so apply it as-is:
+#
+#   kubectl apply -f examples/ai-gateway-prereqs.yaml
+#
+# Or commit it to your own GitOps path and let an app-of-apps of yours pick it
+# up. Do NOT commit it into NIC's foundational apps/ directory; that path
+# belongs to NIC and `nic deploy --regen-apps` rewrites what it owns there.
+#
+# ORDER MATTERS relative to the envoy-gateway values overlay. Apply this file
+# first, then commit examples/envoy-gateway-overlay.yaml. The overlay points
+# envoy-gateway's extensionManager at the controller's Service, so bringing the
+# controller up first avoids a spell of "connection refused" during XDS
+# translation. Nothing breaks permanently if you do it the other way round; it
+# just looks alarming in the logs.
+#
+# ON PRUNING. The two CRD-owning Applications set `prune: false` on purpose.
+# Pruning a CustomResourceDefinition deletes every custom resource of that kind
+# across the whole cluster, so an errant resync here could take out every
+# AIGatewayRoute and InferencePool on the cluster, including ones this pack did
+# not create. The cost of that choice is that a CRD renamed or dropped upstream
+# is left behind on a version bump and has to be removed by hand. For CRDs that
+# is the better failure. The controller Application, which owns only a
+# Deployment, Service and webhook config, prunes normally.
+#
+# Versions are pinned as a set: Envoy AI Gateway v0.5.x expects Envoy Gateway
+# v1.6.x, and GIE v1.5.0 is the validated pair. See
+# https://aigateway.envoyproxy.io/docs/compatibility/ before bumping any of
+# them. Note that GIE v1.6.0 removed the InferenceObjective and
+# InferenceModelRewrite kinds, so that bump needs checking against llm-d's EPP
+# rather than being treated as routine.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: envoy-ai-gateway-crds
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: nebari-llm-pack
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: nebari-apps
+
+  source:
+    chart: ai-gateway-crds-helm
+    repoURL: docker.io/envoyproxy
+    targetRevision: v0.5.0
+    helm:
+      releaseName: envoy-ai-gateway-crds
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: envoy-ai-gateway-system
+
+  syncPolicy:
+    automated:
+      # prune: false - see ON PRUNING in the header.
+      prune: false
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+---
+# The upstream release ships a flat manifests.yaml, which ArgoCD cannot consume
+# from a URL. It also ships config/crd/kustomization.yaml, which ArgoCD can:
+# at v1.5.0 that kustomization resolves to exactly the same four CRDs as the
+# release asset, so pointing at the repo avoids vendoring the manifests or
+# hand-authoring a kustomize directory in your own repo.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gateway-api-inference-extension
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: nebari-llm-pack
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: nebari-apps
+
+  source:
+    repoURL: https://github.com/kubernetes-sigs/gateway-api-inference-extension
+    targetRevision: v1.5.0
+    path: config/crd
+
+  destination:
+    server: https://kubernetes.default.svc
+    # CRDs are cluster-scoped; ArgoCD still requires a namespace value.
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      # prune: false - see ON PRUNING in the header.
+      prune: false
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: envoy-ai-gateway
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: nebari-llm-pack
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: nebari-apps
+
+  source:
+    chart: ai-gateway-helm
+    repoURL: docker.io/envoyproxy
+    targetRevision: v0.5.0
+    helm:
+      releaseName: envoy-ai-gateway
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: envoy-ai-gateway-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

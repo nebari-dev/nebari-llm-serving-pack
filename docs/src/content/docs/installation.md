@@ -543,116 +543,74 @@ errors.
 > `nvidia.com/gpu` regardless of which runtime is default, so a pod
 > can schedule onto the GPU yet still miss the NVIDIA injection.
 
-## 4. Install AI Gateway and Inference Extension CRDs
+## 4. Install the AI Gateway prerequisites
 
-The pack's per-model routing relies on two upstream CRD bundles that
-must exist on the cluster before the pack itself reconciles any
-`LLMModel`:
+The pack's per-model routing needs three upstream pieces on the cluster
+before it will reconcile any `LLMModel`:
 
 - **Envoy AI Gateway CRDs** (`AIGatewayRoute`, `AIServiceBackend`,
   `BackendSecurityPolicy`, `GatewayConfig`, `MCPRoute`) - the
-  `nebari-llm-operator` creates these per LLMModel and the AI
-  Gateway controller (section 5) reconciles them.
+  `nebari-llm-operator` creates these per LLMModel.
 - **gateway-api-inference-extension CRDs** (`InferencePool`,
   `InferenceObjective`, `InferenceModelRewrite`, `InferencePoolImport`)
   - the llm-d End-Point Picker (EPP) container looks up
-  `InferencePool` at startup and crashloops without it.
+  `InferencePool` at startup and crashloops without it. No controller is
+  needed; the EPP is bundled inside the LLMModel pod the operator
+  creates.
+- **The Envoy AI Gateway controller**, which does two jobs the pack
+  relies on:
+  - *XDS extension server.* Envoy Gateway calls it during XDS
+    translation (over a gRPC service on port 1063) to insert the
+    `ext_proc` HTTP filter into the listener filter chain for routes
+    that reference an `InferencePool` or `AIGatewayRoute`. Without
+    this, per-model routing falls back to `direct_response: 500`.
+  - *Pod-mutating admission webhook.* When Envoy Gateway creates the
+    Envoy proxy pod (the data plane), the webhook patches in an
+    `ai-gateway-extproc` native-sidecar container. It only injects when
+    there is at least one `AIGatewayRoute` bound to the gateway, so the
+    sidecar appears on the next proxy-pod recreation *after* the first
+    `LLMModel` reconciles in section 9.
 
-Both bundles install the CRDs only; the AI Gateway controller comes in
-section 5, and no controller is required for the inference-extension on this
-runbook (the EPP is bundled inside the LLMModel pod the operator
-creates).
+### 4.1 Apply the prerequisites
 
-### 4.1 Add the ArgoCD Applications
+None of this is cluster-specific - fixed upstream versions, fixed
+namespaces - so it ships as one ready-to-apply file with nothing to fill
+in:
 
-> **Where these files go.** Not in NIC's foundational `apps/`
-> directory - that path belongs to NIC and `nic deploy --regen-apps`
-> rewrites what it owns there. Use a directory of your own that ArgoCD
-> reads, shown below as `clusters/<name>/pack-apps/`, or apply the
-> manifests once with `kubectl apply -f`; each Application's source is
-> an upstream chart or repo, so it sustains itself from then on.
-
-`clusters/<name>/pack-apps/envoy-ai-gateway-crds.yaml`:
-
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: envoy-ai-gateway-crds
-  namespace: argocd
-  labels:
-    app.kubernetes.io/part-of: nebari-llm-pack
-  annotations:
-    argocd.argoproj.io/sync-wave: "3"
-  finalizers:
-    - resources-finalizer.argocd.argoproj.io
-spec:
-  project: nebari-apps
-  source:
-    chart: ai-gateway-crds-helm
-    repoURL: docker.io/envoyproxy
-    targetRevision: v0.5.0
-    helm:
-      releaseName: envoy-ai-gateway-crds
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: envoy-ai-gateway-system
-  syncPolicy:
-    automated: { prune: true, selfHeal: true, allowEmpty: false }
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-    retry:
-      limit: 5
-      backoff: { duration: 5s, factor: 2, maxDuration: 3m }
+```bash
+kubectl apply -f https://raw.githubusercontent.com/nebari-dev/llm-serving-pack/main/examples/ai-gateway-prereqs.yaml
 ```
 
-`clusters/<name>/pack-apps/gateway-api-inference-extension.yaml` - this one
-points at a kustomize directory in your repo (because the upstream
-release ships a flat manifests.yaml that ArgoCD cannot Helm-template):
+That creates three ArgoCD Applications: `envoy-ai-gateway-crds` and
+`gateway-api-inference-extension` at sync wave 3, and the
+`envoy-ai-gateway` controller at wave 4. If you would rather keep it in
+git, commit
+[`examples/ai-gateway-prereqs.yaml`](https://github.com/nebari-dev/llm-serving-pack/blob/main/examples/ai-gateway-prereqs.yaml)
+to a path of your own (e.g. `clusters/<name>/pack-apps/`) and let an
+app-of-apps of yours adopt it. Do not commit it into NIC's foundational
+`apps/` directory - that path belongs to NIC and
+`nic deploy --regen-apps` rewrites what it owns there.
 
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: gateway-api-inference-extension
-  namespace: argocd
-  labels:
-    app.kubernetes.io/part-of: nebari-llm-pack
-  annotations:
-    argocd.argoproj.io/sync-wave: "3"
-  finalizers:
-    - resources-finalizer.argocd.argoproj.io
-spec:
-  project: nebari-apps
-  source:
-    repoURL: https://github.com/<your-org>/<cluster-config-repo>.git
-    targetRevision: main
-    path: clusters/<name>/manifests/gateway-api-inference-extension
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: kube-system   # CRDs are cluster-scoped; ArgoCD just requires a value
-  syncPolicy:
-    automated: { prune: true, selfHeal: true, allowEmpty: false }
-    syncOptions: [ServerSideApply=true]
-    retry:
-      limit: 5
-      backoff: { duration: 5s, factor: 2, maxDuration: 3m }
-```
+> **Apply this before the section 6 overlay.** The overlay points
+> envoy-gateway's `extensionManager` at the controller's Service, so
+> bringing the controller up first avoids a spell of "connection
+> refused" during XDS translation. Doing it in the other order is
+> recoverable, it just looks alarming in the logs.
 
-`clusters/<name>/manifests/gateway-api-inference-extension/kustomization.yaml`:
+> **The two CRD Applications set `prune: false` deliberately.** Pruning
+> a CRD deletes every custom resource of that kind cluster-wide, so an
+> errant resync must not be able to remove every `AIGatewayRoute` and
+> `InferencePool` on the cluster. The trade is that a CRD dropped
+> upstream is left behind on a version bump. Applying the three
+> Applications independently also means they sync concurrently, so the
+> controller may briefly crashloop until its CRDs land; it recovers on
+> its own. If you want the waves respected, adopt the file through an
+> app-of-apps rather than applying it directly - sync waves only mean
+> something to a parent.
 
-```yaml
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.5.0/manifests.yaml
-```
+## 5. Verify the prerequisites
 
-`git push` all three files, then apply the two Applications with
-`kubectl apply -f` (or through your own app-of-apps). `nebari-root`
-watches only NIC's `apps/` directory, so it will not adopt them on its
-own.
-
-### 4.2 Verify CRDs are present
+### 5.1 CRDs are present
 
 ```bash
 kubectl get crd | grep -E 'aigateway.envoyproxy.io|inference.networking'
@@ -672,73 +630,7 @@ inferencepoolimports.inference.networking.x-k8s.io
 inferencepools.inference.networking.k8s.io
 ```
 
-```bash
-kubectl get application -n argocd envoy-ai-gateway-crds gateway-api-inference-extension
-```
-
-Expected: both `Synced` and `Healthy`.
-
-## 5. Install the Envoy AI Gateway controller
-
-The AI Gateway controller does two jobs the pack relies on:
-
-- **XDS extension server.** Envoy Gateway calls it during XDS
-  translation (over a gRPC service on port 1063) to insert the
-  `ext_proc` HTTP filter into the listener filter chain for routes
-  that reference an `InferencePool` or `AIGatewayRoute`. Without this,
-  per-model routing falls back to `direct_response: 500`.
-- **Pod-mutating admission webhook.** When Envoy Gateway creates the
-  Envoy proxy pod (the data plane), the webhook patches in an
-  `ai-gateway-extproc` native-sidecar container. The webhook only
-  injects when there is at least one `AIGatewayRoute` bound to the
-  gateway, so the sidecar will appear on the next proxy-pod recreation
-  *after* the first `LLMModel` reconciles in section 9.
-
-Install the controller before the envoy-gateway reconfig in section 6:
-envoy-gateway's `extensionManager.service.fqdn` will point at this
-controller's Service, and bringing them up in this order avoids noisy
-"connection refused" log lines during XDS translation.
-
-### 5.1 Add the ArgoCD Application
-
-`clusters/<name>/pack-apps/envoy-ai-gateway.yaml`:
-
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: envoy-ai-gateway
-  namespace: argocd
-  labels:
-    app.kubernetes.io/part-of: nebari-llm-pack
-  annotations:
-    argocd.argoproj.io/sync-wave: "4"
-  finalizers:
-    - resources-finalizer.argocd.argoproj.io
-spec:
-  project: nebari-apps
-  source:
-    chart: ai-gateway-helm
-    repoURL: docker.io/envoyproxy
-    targetRevision: v0.5.0
-    helm:
-      releaseName: envoy-ai-gateway
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: envoy-ai-gateway-system
-  syncPolicy:
-    automated: { prune: true, selfHeal: true, allowEmpty: false }
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-    retry:
-      limit: 5
-      backoff: { duration: 5s, factor: 2, maxDuration: 3m }
-```
-
-`git push`, then apply it with `kubectl apply -f` (or through your own
-app-of-apps) - it lives outside NIC's `apps/` directory, so `nebari-root`
-will not adopt it.
-
-### 5.2 Verify the controller, service, and webhook
+### 5.2 The controller, its Service, and the webhook
 
 ```bash
 kubectl get pods,svc -n envoy-ai-gateway-system
@@ -756,6 +648,15 @@ envoy-ai-gateway-gateway-pod-mutator.envoy-ai-gateway-system  1
 Port 1063 is the XDS extension server (envoy-gateway's
 `extensionManager.service.fqdn` will reference this). Port 9443 is the
 admission webhook. 9090 is metrics.
+
+### 5.3 All three Applications are healthy
+
+```bash
+kubectl get application -n argocd \
+  envoy-ai-gateway-crds gateway-api-inference-extension envoy-ai-gateway
+```
+
+Expected: all three `Synced` and `Healthy`.
 
 ## 6. Reconfigure envoy-gateway with AI Gateway extension wiring
 
@@ -1408,9 +1309,12 @@ of the checklist; resolve before continuing.
 ### 10.2 Namespace pod health
 
 ```bash
+# gpu-operator is NIC's namespace; nvidia-gpu-operator is the one the
+# section 3.1 self-managed install uses. Only one of the two exists.
 for ns in cert-manager envoy-gateway-system envoy-ai-gateway-system \
-          nvidia-gpu-operator keycloak nebari-operator-system \
-          nebari-llm-serving-system; do
+          gpu-operator nvidia-gpu-operator keycloak \
+          nebari-operator-system nebari-llm-serving-system; do
+  kubectl get ns "$ns" >/dev/null 2>&1 || continue
   echo "== $ns =="
   kubectl get pods -n "$ns" --no-headers \
     | awk '$3 != "Running" && $3 != "Completed" {print}'
