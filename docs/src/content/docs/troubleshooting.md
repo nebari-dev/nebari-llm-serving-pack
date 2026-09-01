@@ -279,14 +279,14 @@ kubectl rollout restart deploy -n envoy-gateway-system envoy-gateway
 
 ## External provider (PassthroughModel) not working
 
-**Upstream 401 / auth errors from the provider.** The gateway injects the key from `spec.provider.credentialSecretName`. Confirm the Secret exists in the operator namespace and has an `apiKey` key:
+**Upstream 401 / auth errors from the provider.** The gateway injects the key from `spec.provider.credentialSecretName`. Inspect the credential condition first:
 
-```bash
-kubectl -n nebari-llm-serving-system get secret <credentialSecretName> \
-  -o jsonpath='{.data.apiKey}' | base64 -d | head -c 8; echo
+```console
+$ kubectl -n nebari-llm-serving-system get passthroughmodel <name> \
+    -o jsonpath='{range .status.conditions[?(@.type=="CredentialResolved")]}{.status} {.reason}: {.message}{"\n"}{end}'
 ```
 
-If empty or the wrong key name, recreate it: the key MUST be named `apiKey`.
+`SecretNotFound` means the referenced Secret does not exist in the PassthroughModel's namespace. `APIKeyMissing` means the Secret exists but its `apiKey` entry is absent or empty. Create or update the Secret with that exact key name; the operator watches referenced credential Secrets and refreshes the condition automatically. `Resolved` confirms only that the entry is non-empty. If the provider still returns 401, replace an invalid, expired, or revoked key.
 
 **PassthroughModel stuck with `ApplyFailed`.** This condition usually means the Envoy AI Gateway CRDs are not installed; the operator requeues every minute rather than failing outright. Check the CR and the CRDs:
 
