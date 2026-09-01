@@ -66,10 +66,10 @@ jobs:
           BASE: ${{ steps.base.outputs.base }}
         run: SKIP_BUILD=1 bash scripts/check-links.sh
 
-      # Fork PRs cannot read secrets; skip deploy there (build + link-check still gate).
+      # Fork and Dependabot PRs cannot read secrets; skip deploy there (build + link-check still gate).
       - name: Deploy to Cloudflare Pages
         id: deploy
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
         uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
