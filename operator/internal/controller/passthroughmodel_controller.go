@@ -41,17 +41,6 @@ import (
 	"github.com/nebari-dev/nebari-llm-serving-pack/operator/internal/controller/reconcilers"
 )
 
-// Condition types reported on PassthroughModel status.
-const (
-	// CondBackendConfigured covers the provider plumbing: Backend,
-	// BackendTLSPolicy, AIServiceBackend, BackendSecurityPolicy.
-	CondBackendConfigured = "BackendConfigured"
-	// CondExternalEndpointReady covers the external route + apiKeyAuth policy.
-	CondExternalEndpointReady = "ExternalEndpointReady"
-	// CondInternalEndpointReady covers the internal route + JWT policy.
-	CondInternalEndpointReady = "InternalEndpointReady"
-)
-
 // PassthroughModelReconciler reconciles a PassthroughModel object.
 //
 // Unlike the LLMModel reconciler there is no serving stack to manage: the
@@ -128,9 +117,9 @@ func (r *PassthroughModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// Gateway kinds tolerate a missing CRD: a failed apply does not fail the
-	// whole reconcile. Unlike the LLMModel reconciler (which only logs and
-	// moves on), each failure is captured in a status condition and the
+	// whole reconcile. Each failure is captured in a status condition and the
 	// reconcile is requeued so the resources are retried once the CRDs exist.
+	// The LLMModel reconciler does the same.
 	conditions := []metav1.Condition{}
 
 	backendErr := r.applyAll(ctx, log, pm,
@@ -158,10 +147,8 @@ func (r *PassthroughModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	phase := llmv1alpha1.PassthroughPhaseReady
-	for _, c := range conditions {
-		if c.Status == metav1.ConditionFalse && c.Reason == "ApplyFailed" {
-			phase = llmv1alpha1.PassthroughPhaseError
-		}
+	if hasApplyFailure(conditions) {
+		phase = llmv1alpha1.PassthroughPhaseError
 	}
 
 	if err := r.updateStatus(ctx, log, pm, phase, conditions); err != nil {
@@ -275,32 +262,6 @@ func (r *PassthroughModelReconciler) createOrUpdateUnstructured(ctx context.Cont
 	}
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	return r.Update(ctx, obj)
-}
-
-func conditionFor(condType string, err error, okMessage string) metav1.Condition {
-	if err != nil {
-		return metav1.Condition{
-			Type:    condType,
-			Status:  metav1.ConditionFalse,
-			Reason:  "ApplyFailed",
-			Message: err.Error(),
-		}
-	}
-	return metav1.Condition{
-		Type:    condType,
-		Status:  metav1.ConditionTrue,
-		Reason:  "Applied",
-		Message: okMessage,
-	}
-}
-
-func disabledCondition(condType string) metav1.Condition {
-	return metav1.Condition{
-		Type:    condType,
-		Status:  metav1.ConditionFalse,
-		Reason:  "EndpointDisabled",
-		Message: "endpoint disabled in spec",
-	}
 }
 
 func (r *PassthroughModelReconciler) updateStatus(

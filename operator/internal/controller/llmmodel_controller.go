@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"time"
 
@@ -27,6 +28,8 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -165,46 +168,81 @@ func (r *LLMModelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// 10. Check deployment readiness to determine phase
 	phase := r.determinePhase(ctx, model)
 	if phase == llmv1alpha1.PhaseDownloading || phase == llmv1alpha1.PhaseStarting {
-		// Update status with phase and replica counts even during intermediate phases
-		if err := r.updateStatus(ctx, log, model, phase); err != nil {
+		// Update status with phase and replica counts even during intermediate
+		// phases. No conditions yet: step 11 has not run, so reporting on the
+		// gateway resources would be reporting on work not attempted.
+		if err := r.updateStatus(ctx, log, model, phase, nil); err != nil {
 			log.Error(err, "failed to update status during intermediate phase", "phase", phase)
 		}
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
-	// 11. Once model is (or will be) serving, create downstream resources
+	// 11. Once model is (or will be) serving, create downstream resources.
+	//
+	// The gateway kinds here (InferencePool, AIGatewayRoute, SecurityPolicy)
+	// come from CRDs this pack does not install - see section 4 of the install
+	// runbook. A missing CRD does not fail the reconcile, because everything
+	// this pack owns is still worth converging and the applies succeed on a
+	// later pass. It does get reported: each outcome becomes a status
+	// condition, and a failure downgrades the phase so the model never claims
+	// Ready while nothing can route to it.
+	var conditions []metav1.Condition
 	if r.Config != nil {
 		// InferencePool + EPP
 		poolResources, err := reconcilers.BuildInferencePoolResources(model, r.Config)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("building inference pool resources: %w", err)
 		}
-		if err := r.reconcileInferencePoolResources(ctx, log, model, poolResources); err != nil {
+		poolErr, err := r.reconcileInferencePoolResources(ctx, log, model, poolResources)
+		if err != nil {
 			return ctrl.Result{}, err
 		}
+		conditions = append(conditions,
+			conditionFor(CondInferencePoolReady, poolErr, "InferencePool applied"))
 
 		// Routing (AIGatewayRoutes)
 		routingResources, err := reconcilers.BuildRoutingResources(model, r.Config)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("building routing resources: %w", err)
 		}
-		if err := r.reconcileRoutingResources(ctx, log, model, routingResources); err != nil {
-			return ctrl.Result{}, err
-		}
+		routeExtErr, routeIntErr := r.reconcileRoutingResources(ctx, log, model, routingResources)
 
 		// SecurityPolicies (from auth resources built in step 7)
+		var policyExtErr, policyIntErr error
 		if authResources != nil {
-			if err := r.reconcileSecurityPolicies(ctx, log, authResources); err != nil {
-				return ctrl.Result{}, err
-			}
+			policyExtErr, policyIntErr = r.reconcileSecurityPolicies(ctx, log, authResources)
+		}
+
+		// One condition per endpoint, covering its route and its policy
+		// together: they fail for the same reason and are fixed by the same
+		// action, so splitting them would only add noise.
+		if routingResources.ExternalRoute != nil {
+			conditions = append(conditions, conditionFor(CondExternalEndpointReady,
+				errors.Join(routeExtErr, policyExtErr), "external route and apiKeyAuth policy applied"))
+		} else {
+			conditions = append(conditions, disabledCondition(CondExternalEndpointReady))
+		}
+		if routingResources.InternalRoute != nil {
+			conditions = append(conditions, conditionFor(CondInternalEndpointReady,
+				errors.Join(routeIntErr, policyIntErr), "internal route and JWT policy applied"))
+		} else {
+			conditions = append(conditions, disabledCondition(CondInternalEndpointReady))
 		}
 	}
 
 	// 12. Update status
-	if err := r.updateStatus(ctx, log, model, phase); err != nil {
+	phase = phaseWithRoutingFailure(phase, conditions)
+	if err := r.updateStatus(ctx, log, model, phase, conditions); err != nil {
 		return ctrl.Result{}, err
 	}
 
+	if hasApplyFailure(conditions) {
+		// Retry: the usual cause is the AI Gateway or Inference Extension CRDs
+		// not being installed yet, which a later pass fixes without any change
+		// to the LLMModel itself. Without this the model would sit Degraded
+		// until something else triggered a reconcile.
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -373,115 +411,129 @@ func (r *LLMModelReconciler) reconcileModelServiceResources(
 	return nil
 }
 
-// reconcileInferencePoolResources creates or updates InferencePool and EPP resources.
+// reconcileInferencePoolResources applies the InferencePool and the EPP's own
+// resources. The returned poolErr reports whether the InferencePool itself
+// could be applied (it needs a CRD this pack does not install); a non-nil err
+// means something this pack does own failed, which is fatal to the reconcile.
 func (r *LLMModelReconciler) reconcileInferencePoolResources(
 	ctx context.Context,
 	log controllerLogger,
 	model *llmv1alpha1.LLMModel,
 	pool *reconcilers.InferencePoolResources,
-) error {
-	// InferencePool (unstructured CRD - non-fatal if missing)
+) (poolErr error, err error) {
+	// InferencePool (unstructured CRD - non-fatal if missing, but reported).
+	// The error is returned via poolErr rather than failing the reconcile: the
+	// EPP Deployment and RBAC below are still worth converging, and the pool
+	// applies on a later pass once the Inference Extension CRDs exist.
 	pool.InferencePool.SetNamespace(model.Namespace)
-	if err := r.createOrUpdateUnstructured(ctx, pool.InferencePool); err != nil {
-		log.Error(err, "failed to reconcile InferencePool - CRD may not be installed, skipping")
+	poolErr = r.createOrUpdateUnstructured(ctx, pool.InferencePool)
+	if poolErr != nil {
+		log.Error(poolErr, "failed to reconcile InferencePool - CRD may not be installed")
 	}
 
 	// EPP ServiceAccount
 	pool.EPPServiceAccount.Namespace = model.Namespace
 	if err := reconcilers.SetOwnerReference(model, pool.EPPServiceAccount, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner on EPP ServiceAccount: %w", err)
+		return poolErr, fmt.Errorf("setting owner on EPP ServiceAccount: %w", err)
 	}
 	if err := r.createOrUpdateServiceAccount(ctx, pool.EPPServiceAccount); err != nil {
-		return fmt.Errorf("reconciling EPP ServiceAccount: %w", err)
+		return poolErr, fmt.Errorf("reconciling EPP ServiceAccount: %w", err)
 	}
 
 	// EPP Role
 	pool.EPPRole.Namespace = model.Namespace
 	if err := reconcilers.SetOwnerReference(model, pool.EPPRole, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner on EPP Role: %w", err)
+		return poolErr, fmt.Errorf("setting owner on EPP Role: %w", err)
 	}
 	if err := r.createOrUpdateRole(ctx, pool.EPPRole); err != nil {
-		return fmt.Errorf("reconciling EPP Role: %w", err)
+		return poolErr, fmt.Errorf("reconciling EPP Role: %w", err)
 	}
 
 	// EPP RoleBinding
 	pool.EPPRoleBinding.Namespace = model.Namespace
 	if err := reconcilers.SetOwnerReference(model, pool.EPPRoleBinding, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner on EPP RoleBinding: %w", err)
+		return poolErr, fmt.Errorf("setting owner on EPP RoleBinding: %w", err)
 	}
 	if err := r.createOrUpdateRoleBinding(ctx, pool.EPPRoleBinding); err != nil {
-		return fmt.Errorf("reconciling EPP RoleBinding: %w", err)
+		return poolErr, fmt.Errorf("reconciling EPP RoleBinding: %w", err)
 	}
 
 	// EPP Service
 	pool.EPPService.Namespace = model.Namespace
 	if err := reconcilers.SetOwnerReference(model, pool.EPPService, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner on EPP Service: %w", err)
+		return poolErr, fmt.Errorf("setting owner on EPP Service: %w", err)
 	}
 	if err := r.createOrUpdateService(ctx, pool.EPPService); err != nil {
-		return fmt.Errorf("reconciling EPP Service: %w", err)
+		return poolErr, fmt.Errorf("reconciling EPP Service: %w", err)
 	}
 
 	// EPP ConfigMap (must exist before Deployment so the volume mount resolves)
 	pool.EPPConfigMap.Namespace = model.Namespace
 	if err := reconcilers.SetOwnerReference(model, pool.EPPConfigMap, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner on EPP ConfigMap: %w", err)
+		return poolErr, fmt.Errorf("setting owner on EPP ConfigMap: %w", err)
 	}
 	if err := r.createOrUpdateConfigMap(ctx, pool.EPPConfigMap); err != nil {
-		return fmt.Errorf("reconciling EPP ConfigMap: %w", err)
+		return poolErr, fmt.Errorf("reconciling EPP ConfigMap: %w", err)
 	}
 
 	// EPP Deployment
 	pool.EPPDeployment.Namespace = model.Namespace
 	if err := reconcilers.SetOwnerReference(model, pool.EPPDeployment, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner on EPP Deployment: %w", err)
+		return poolErr, fmt.Errorf("setting owner on EPP Deployment: %w", err)
 	}
 	if err := r.createOrUpdateDeployment(ctx, pool.EPPDeployment); err != nil {
-		return fmt.Errorf("reconciling EPP Deployment: %w", err)
+		return poolErr, fmt.Errorf("reconciling EPP Deployment: %w", err)
 	}
 
-	return nil
+	return poolErr, nil
 }
 
-// reconcileRoutingResources creates or updates AIGatewayRoute resources.
+// reconcileRoutingResources creates or updates AIGatewayRoute resources and
+// returns, per endpoint, whether the apply succeeded. A missing AI Gateway CRD
+// is not fatal - the caller turns the error into a status condition and
+// requeues - but it must not be swallowed, because the runtime symptom of an
+// absent route is a bare HTTP 404 with nothing to point at the cause.
 func (r *LLMModelReconciler) reconcileRoutingResources(
 	ctx context.Context,
 	log controllerLogger,
 	model *llmv1alpha1.LLMModel,
 	routing *reconcilers.RoutingResources,
-) error { //nolint:unparam // error return kept for future extensibility
+) (externalErr, internalErr error) {
 	if routing.ExternalRoute != nil {
 		routing.ExternalRoute.SetNamespace(model.Namespace)
-		if err := r.createOrUpdateUnstructured(ctx, routing.ExternalRoute); err != nil {
-			log.Error(err, "failed to reconcile external AIGatewayRoute - CRD may not be installed, skipping")
+		if externalErr = r.createOrUpdateUnstructured(ctx, routing.ExternalRoute); externalErr != nil {
+			log.Error(externalErr, "failed to reconcile external AIGatewayRoute - CRD may not be installed")
 		}
 	}
 	if routing.InternalRoute != nil {
 		routing.InternalRoute.SetNamespace(model.Namespace)
-		if err := r.createOrUpdateUnstructured(ctx, routing.InternalRoute); err != nil {
-			log.Error(err, "failed to reconcile internal AIGatewayRoute - CRD may not be installed, skipping")
+		if internalErr = r.createOrUpdateUnstructured(ctx, routing.InternalRoute); internalErr != nil {
+			log.Error(internalErr, "failed to reconcile internal AIGatewayRoute - CRD may not be installed")
 		}
 	}
-	return nil
+	return externalErr, internalErr
 }
 
-// reconcileSecurityPolicies creates or updates SecurityPolicy resources.
+// reconcileSecurityPolicies creates or updates SecurityPolicy resources,
+// returning per-endpoint outcomes for the same reason as
+// reconcileRoutingResources: a SecurityPolicy that was never applied leaves the
+// endpoint unauthenticated-looking rather than obviously broken.
 func (r *LLMModelReconciler) reconcileSecurityPolicies(
 	ctx context.Context,
 	log controllerLogger,
 	auth *reconcilers.AuthResources,
-) error { //nolint:unparam // error return kept for future extensibility
+) (externalErr, internalErr error) {
 	if auth.ExternalSecurityPolicy != nil {
-		if err := r.createOrUpdateUnstructured(ctx, auth.ExternalSecurityPolicy); err != nil {
-			log.Error(err, "failed to reconcile external SecurityPolicy - CRD may not be installed, skipping")
+		if externalErr = r.createOrUpdateUnstructured(ctx, auth.ExternalSecurityPolicy); externalErr != nil {
+			log.Error(externalErr, "failed to reconcile external SecurityPolicy - CRD may not be installed")
 		}
 	}
 	if auth.InternalSecurityPolicy != nil {
-		if err := r.createOrUpdateUnstructured(ctx, auth.InternalSecurityPolicy); err != nil {
-			log.Error(err, "failed to reconcile internal SecurityPolicy - CRD may not be installed, skipping")
+		if internalErr = r.createOrUpdateUnstructured(ctx, auth.InternalSecurityPolicy); internalErr != nil {
+			log.Error(internalErr, "failed to reconcile internal SecurityPolicy - CRD may not be installed")
 		}
 	}
-	return nil
+	return externalErr, internalErr
 }
 
 // determinePhase inspects the model Deployment and its pods to determine the current lifecycle phase.
@@ -538,6 +590,7 @@ func (r *LLMModelReconciler) updateStatus(
 	log controllerLogger,
 	model *llmv1alpha1.LLMModel,
 	phase llmv1alpha1.LLMModelPhase,
+	conditions []metav1.Condition,
 ) error {
 	// Fetch fresh copy to avoid update conflicts
 	fresh := &llmv1alpha1.LLMModel{}
@@ -547,6 +600,10 @@ func (r *LLMModelReconciler) updateStatus(
 
 	fresh.Status.Phase = phase
 	fresh.Status.ObservedGeneration = fresh.Generation
+	for _, c := range conditions {
+		c.ObservedGeneration = fresh.Generation
+		meta.SetStatusCondition(&fresh.Status.Conditions, c)
+	}
 
 	// Update replica counts
 	dep := &appsv1.Deployment{}

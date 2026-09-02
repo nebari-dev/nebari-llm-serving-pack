@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -462,6 +463,86 @@ var _ = Describe("LLMModel Controller", func() {
 				Name:      modelName + "-deny-direct",
 				Namespace: testNamespace,
 			}, np)).To(Succeed())
+		})
+	})
+
+	// The envtest API server has this operator's CRDs but not the AI Gateway's
+	// or the Gateway API Inference Extension's, so applying an AIGatewayRoute,
+	// SecurityPolicy or InferencePool fails with no-kind-match - exactly what a
+	// real cluster looks like when section 4 of the install runbook was skipped.
+	// Previously the reconciler logged those failures and reported the model
+	// Ready anyway, which is what made the runtime 404 so hard to diagnose.
+	Describe("Missing gateway CRDs", func() {
+		const modelName = "test-missing-crds"
+
+		AfterEach(func() {
+			model := &llmv1alpha1.LLMModel{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: modelName, Namespace: testNamespace}, model); err == nil {
+				model.Finalizers = nil
+				_ = k8sClient.Update(ctx, model)
+				_ = k8sClient.Delete(ctx, model)
+			}
+		})
+
+		It("reports Degraded with a failing endpoint condition instead of Ready", func() {
+			By("creating the LLMModel and reconciling to create the Deployment")
+			model := newMinimalModel(modelName)
+			Expect(k8sClient.Create(ctx, model)).To(Succeed())
+
+			r := newReconciler()
+			Expect(reconcileUntilStable(r, ctx, reconcileRequest(modelName))).To(Succeed())
+
+			By("marking the Deployment ready so the reconcile reaches the routing step")
+			// Nothing runs the Deployment controller in envtest, so readyReplicas
+			// stays 0 and determinePhase would return Starting, short-circuiting
+			// before any gateway resource is applied. Setting status by hand is
+			// what gets us to the code path under test.
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: modelName, Namespace: testNamespace}, dep)).To(Succeed())
+			dep.Status.Replicas = 1
+			dep.Status.ReadyReplicas = 1
+			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
+
+			By("reconciling again now that the model counts as serving")
+			_, err := r.Reconcile(ctx, reconcileRequest(modelName))
+			Expect(err).NotTo(HaveOccurred(), "a missing CRD must not fail the whole reconcile")
+
+			By("checking the model does not claim to be Ready")
+			fresh := &llmv1alpha1.LLMModel{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: modelName, Namespace: testNamespace}, fresh)).To(Succeed())
+			Expect(fresh.Status.Phase).To(Equal(llmv1alpha1.PhaseDegraded),
+				"a model whose routes could not be applied is not Ready")
+
+			By("checking the failure is visible as a condition")
+			cond := meta.FindStatusCondition(fresh.Status.Conditions, CondExternalEndpointReady)
+			Expect(cond).NotTo(BeNil(), "the external endpoint condition must be reported")
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(reasonApplyFailed))
+			Expect(cond.Message).NotTo(BeEmpty(), "the condition must say what failed")
+
+			By("checking the InferencePool prerequisite is reported separately")
+			poolCond := meta.FindStatusCondition(fresh.Status.Conditions, CondInferencePoolReady)
+			Expect(poolCond).NotTo(BeNil(), "a missing GIE CRD must be distinguishable from a missing AI Gateway CRD")
+			Expect(poolCond.Status).To(Equal(metav1.ConditionFalse))
+		})
+
+		It("requeues so it recovers once the CRDs are installed", func() {
+			model := newMinimalModel(modelName)
+			Expect(k8sClient.Create(ctx, model)).To(Succeed())
+
+			r := newReconciler()
+			Expect(reconcileUntilStable(r, ctx, reconcileRequest(modelName))).To(Succeed())
+
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: modelName, Namespace: testNamespace}, dep)).To(Succeed())
+			dep.Status.Replicas = 1
+			dep.Status.ReadyReplicas = 1
+			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
+
+			result, err := r.Reconcile(ctx, reconcileRequest(modelName))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0),
+				"a degraded model must be retried so it heals once the CRDs exist")
 		})
 	})
 
