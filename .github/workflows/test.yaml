@@ -7,6 +7,24 @@ on:
     branches: [main]
 
 jobs:
+  check-default-images:
+    name: Check default images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      - name: Check anonymous registry availability
+        working-directory: operator
+        run: go run ./cmd/check-default-images --values ../charts/nebari-llm-serving/values.yaml
+
   test-operator:
     name: Test operator
     runs-on: ubuntu-latest
