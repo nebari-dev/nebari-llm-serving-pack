@@ -1,6 +1,10 @@
 CLAUDE.md
 docs/superpowers/
 .claude/
+# Ship the Nebari UI skill installed by `shadcn add @nebari/claude-skill`.
+!frontend/.claude/
+frontend/.claude/*
+!frontend/.claude/skills/
 
 # Local dev secrets (OPENROUTER_API_KEY, etc.)
 .env
