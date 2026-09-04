@@ -1,13 +1,17 @@
 // biome-ignore-all lint/a11y/noNoninteractiveTabindex: table scroll containers need keyboard access when content overflows.
 import type * as React from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 type TableProps = React.ComponentProps<"table"> & {
-  /** Accessible name for the keyboard-focusable horizontal scroll container. */
+  /** Accessible name for the horizontal scroll container. */
   scrollContainerLabel?: string;
   /** Additional classes for the horizontal scroll container. */
   scrollContainerClassName?: string;
-  /** Props forwarded to the horizontal scroll container. */
+  /**
+   * Props forwarded to the horizontal scroll container. Its `tabIndex`
+   * overrides the automatic focusability applied when the table overflows.
+   */
   scrollContainerProps?: Omit<React.ComponentProps<"section">, "children">;
 };
 
@@ -31,13 +35,58 @@ function Table({
     className: scrollContainerPropsClassName,
     "aria-label": scrollContainerAriaLabel,
     "aria-labelledby": scrollContainerAriaLabelledBy,
+    ref: scrollContainerRef,
     tabIndex: scrollContainerTabIndex,
     ...resolvedScrollContainerProps
   } = scrollContainerProps ?? {};
+  const internalScrollContainerRef = useRef<HTMLElement>(null);
+  const [isHorizontallyScrollable, setIsHorizontallyScrollable] = useState(false);
+  const setScrollContainerRef = useCallback(
+    (element: HTMLElement | null) => {
+      internalScrollContainerRef.current = element;
+
+      if (typeof scrollContainerRef === "function") {
+        return scrollContainerRef(element);
+      }
+
+      if (scrollContainerRef) {
+        scrollContainerRef.current = element;
+      }
+    },
+    [scrollContainerRef],
+  );
   const resolvedScrollContainerLabel =
     scrollContainerAriaLabel ??
     scrollContainerLabel ??
     (ariaLabel === undefined ? "Table scroll area" : `${ariaLabel} scroll area`);
+
+  useEffect(() => {
+    const scrollContainer = internalScrollContainerRef.current;
+    if (!scrollContainer) {
+      return;
+    }
+
+    const updateScrollability = () => {
+      setIsHorizontallyScrollable(scrollContainer.scrollWidth > scrollContainer.clientWidth);
+    };
+
+    updateScrollability();
+    window.addEventListener("resize", updateScrollability);
+
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(updateScrollability);
+    resizeObserver?.observe(scrollContainer);
+
+    const table = scrollContainer.querySelector("table");
+    if (table) {
+      resizeObserver?.observe(table);
+    }
+
+    return () => {
+      window.removeEventListener("resize", updateScrollability);
+      resizeObserver?.disconnect();
+    };
+  }, []);
 
   return (
     <section
@@ -47,7 +96,8 @@ function Table({
       }
       aria-labelledby={scrollContainerAriaLabelledBy}
       data-slot="table-container"
-      tabIndex={scrollContainerTabIndex ?? 0}
+      ref={setScrollContainerRef}
+      tabIndex={scrollContainerTabIndex ?? (isHorizontallyScrollable ? 0 : undefined)}
       className={cn(
         "relative w-full overflow-x-auto rounded-md border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         scrollContainerClassName,
@@ -66,7 +116,7 @@ function Table({
 }
 
 function TableHeader({ className, ...props }: React.ComponentProps<"thead">) {
-  return <thead data-slot="table-header" className={cn("bg-muted", className)} {...props} />;
+  return <thead data-slot="table-header" className={cn("bg-background", className)} {...props} />;
 }
 
 function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
@@ -94,7 +144,7 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
     <tr
       data-slot="table-row"
       className={cn(
-        "border-b border-border hover:bg-muted/50 data-[state=selected]:bg-muted data-[state=selected]:hover:bg-muted motion-safe:transition-[color,background-color] motion-safe:duration-[--duration-fast] motion-safe:ease-[--ease-standard]",
+        "border-b border-border hover:bg-muted/50 data-[state=selected]:bg-muted data-[state=selected]:hover:bg-muted motion-safe:transition-[color,background-color] motion-safe:duration-(--duration-fast) motion-safe:ease-(--ease-standard)",
         className,
       )}
       {...props}
@@ -120,14 +170,14 @@ function TableHead({
       data-slot="table-head"
       tabIndex={isInteractive ? undefined : tabIndex}
       className={cn(
-        "relative h-10 text-left align-middle font-medium text-foreground text-sm leading-5 tracking-normal whitespace-nowrap [&:has([role=checkbox])]:pr-0",
+        "relative h-10 bg-background text-left align-middle font-medium text-foreground text-sm leading-5 tracking-normal whitespace-nowrap [&:has([role=checkbox])]:pr-0",
         isInteractive ? "p-0" : "px-4",
         className,
       )}
     >
       {isInteractive ? (
         <button
-          className="inline-flex h-10 w-full cursor-pointer items-center justify-start gap-1 bg-transparent px-4 text-left font-medium text-foreground text-sm leading-5 tracking-normal underline-offset-4 outline-none hover:bg-muted-foreground/10 hover:underline focus-visible:bg-muted-foreground/10 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset motion-safe:transition-[color,background-color] motion-safe:duration-[--duration-fast] motion-safe:ease-[--ease-standard]"
+          className="inline-flex h-10 w-full cursor-pointer items-center justify-start gap-1 bg-transparent px-4 text-left font-medium text-foreground text-sm leading-5 tracking-normal underline-offset-4 outline-none hover:bg-muted-foreground/10 hover:underline focus-visible:bg-muted-foreground/10 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset motion-safe:transition-[color,background-color] motion-safe:duration-(--duration-fast) motion-safe:ease-(--ease-standard)"
           data-slot="table-head-button"
           onClick={onClick}
           onKeyDown={onKeyDown}
