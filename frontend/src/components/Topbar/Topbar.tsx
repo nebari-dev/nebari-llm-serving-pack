@@ -36,7 +36,7 @@ export function Topbar() {
     : (branding?.logoUrl ?? "/nebari-logo.svg");
 
   return (
-    <NavigationMenu className="h-14 justify-between border-header-border bg-header-background pl-4 text-header-foreground">
+    <NavigationMenu className="h-14 justify-between border-border bg-header pl-4 text-header-foreground">
       <MenuBarBrand href="/" aria-label="Go to homepage">
         <img src={logoSrc} alt={logoAlt} className="h-8 w-auto" />
       </MenuBarBrand>

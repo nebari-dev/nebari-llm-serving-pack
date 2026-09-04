@@ -7,12 +7,15 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Nebari design-system tokens, installed from the @nebari/design shadcn
-   registry (`shadcn add @nebari/theme`). These are the resolved oklch values of
-   the Nebari brand palette for light and dark modes — treat them as
+/* Nebari design-system tokens, installed from the @nebari shadcn registry
+   (`shadcn add @nebari/theme`). These are the resolved oklch values of the
+   Nebari brand palette for light and dark modes — treat them as
    upstream-managed and re-pull via `shadcn add @nebari/theme` rather than
-   hand-tuning. App-specific status / pill / text-secondary tokens (which the
-   Nebari theme does not ship) are layered on top of each block.
+   hand-tuning. The surface stack is canvas (page) → header (app chrome) →
+   card / popover (raised) → muted (recessed); `--background` is the legacy
+   page token kept for compatibility. App-specific header interaction / status
+   / pill / text-secondary tokens (which the Nebari theme does not ship) are
+   layered on top of each block.
 
    Exception: the tokens that are pure shades of --primary / --ring
    (--primary-hover, --sidebar-primary, --sidebar-primary-foreground,
@@ -25,9 +28,15 @@
 :root {
   --radius: 0.625rem;
 
-  --background: oklch(100% 0 0);
+  --background: oklch(97.91% 0 0);
   --foreground: oklch(26.94% 0.0037 286.15);
   --scrim: rgba(0, 0, 0, 0.5);
+
+  --canvas: oklch(100% 0 0);
+  --canvas-foreground: oklch(26.94% 0.0037 286.15);
+
+  --header: oklch(97.91% 0 0);
+  --header-foreground: oklch(26.94% 0.0037 286.15);
 
   --card: oklch(100% 0 0);
   --card-foreground: oklch(26.94% 0.0037 286.15);
@@ -39,7 +48,7 @@
   --primary-foreground: oklch(100% 0 0);
   /* Darker shade of --primary. Mixed in oklab (rectangular, so no hue
      interpolation against an achromatic anchor); 15% black reproduces the
-     previous literal oklch(47.01% 0.1577 311.26) — both render #77399a/#77379a,
+     registry literal oklch(47.01% 0.1577 311.26) — both render #77399a/#77379a,
      a difference of 2/255 on one channel. */
   --primary-hover: color-mix(in oklab, var(--primary), black 15%);
 
@@ -52,6 +61,9 @@
 
   --accent: oklch(95.04% 0.0042 236.5);
   --accent-foreground: oklch(32.95% 0.0209 254.12);
+
+  --info: oklch(95.08% 0.0232 264.46);
+  --info-foreground: oklch(55.04% 0.2158 264.34);
 
   --destructive: oklch(95.06% 0.0247 29.93);
   --destructive-foreground: oklch(54.97% 0.2151 27.33);
@@ -86,20 +98,17 @@
   --duration-fast: 100ms;
   --duration-base: 200ms;
   --duration-slow: 350ms;
+  --duration-loading: 1600ms;
   --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
 
-  /* App-specific tokens (not part of the Nebari theme) */
-  --body-background: #ffffff;
-
-  /* Header semantic tokens, values copied from nebari-landing's index.css */
-  --header-background: #f8f8f8;
-  --header-border: #b7b7bb;
-  --header-foreground: #262628;
+  /* App-defined header tokens (not part of the Nebari theme); values from the
+     nebari-ui skill's header token contract. */
   --header-action-hover: #d9d9dc;
   --notification-badge: #d00000;
   --sign-out-foreground: #d2161c;
 
+  /* App-specific tokens (not part of the Nebari theme) */
   --pill-category-fg: #475467;
   --text-secondary: #4e596a;
 
@@ -121,16 +130,22 @@
   --foreground: oklch(97.91% 0 0);
   --scrim: rgba(0, 0, 0, 0.6);
 
+  --canvas: oklch(21.86% 0.0039 286.08);
+  --canvas-foreground: oklch(97.91% 0 0);
+
+  --header: oklch(26.94% 0.0037 286.15);
+  --header-foreground: oklch(97.91% 0 0);
+
   --card: oklch(33.01% 0.0052 286.11);
   --card-foreground: oklch(97.91% 0 0);
 
-  --popover: oklch(26.94% 0.0037 286.15);
+  --popover: oklch(33.01% 0.0052 286.11);
   --popover-foreground: oklch(97.91% 0 0);
 
   --primary: oklch(61.98% 0.2159 311.67);
   --primary-foreground: oklch(0% 0 0);
   /* Lighter shade of --primary in dark mode. 18% white lands on
-     oklch(68.82% 0.1770 311.67) against the previous literal
+     oklch(68.82% 0.1770 311.67) against the registry literal
      oklch(69.98% 0.1926 311.48) — #bf76e9 vs #c575f4, 0.019 oklab ΔE, the
      closest a mix toward white can get (white contributes no chroma).
      Kept in step with provenance-collector-pack, which shares this file. */
@@ -139,12 +154,15 @@
   --secondary: oklch(40% 0.0269 250.57);
   --secondary-foreground: oklch(95.04% 0.0042 236.5);
 
-  --muted: oklch(33.01% 0.0052 286.11);
+  --muted: oklch(39.94% 0.0066 286.1);
   --muted-foreground: oklch(69.88% 0.013 286.06);
   --muted-foreground-strong: oklch(78.06% 0.0056 286.27);
 
   --accent: oklch(40% 0.0269 250.57);
   --accent-foreground: oklch(95.04% 0.0042 236.5);
+
+  --info: oklch(33.01% 0.1387 264.4);
+  --info-foreground: oklch(69.95% 0.1433 264.44);
 
   --destructive: oklch(33.1% 0.1332 27.42);
   --destructive-foreground: oklch(78.02% 0.1024 27.78);
@@ -175,17 +193,13 @@
   --sidebar-border: oklch(47.01% 0.0112 285.96);
   --sidebar-ring: var(--ring);
 
-  /* App-specific tokens (not part of the Nebari theme) */
-  --body-background: #262628;
-
-  /* Header semantic tokens, values copied from nebari-landing's index.css */
-  --header-background: var(--card);
-  --header-border: #5a5a61;
-  --header-foreground: #f8f8f8;
+  /* App-defined header tokens (not part of the Nebari theme); values from the
+     nebari-ui skill's header token contract. */
   --header-action-hover: #4a4a50;
   --notification-badge: #e00000;
   --sign-out-foreground: #ff6b6b;
 
+  /* App-specific tokens (not part of the Nebari theme) */
   --pill-category-fg: #ffffff;
   --text-secondary: #d0d5dd;
 
@@ -242,6 +256,16 @@
   }
 }
 
+@keyframes nebari-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
 @theme inline {
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
@@ -250,9 +274,10 @@
   --color-foreground: var(--foreground);
   --color-scrim: var(--scrim);
 
-  --color-body-background: var(--body-background);
-  --color-header-background: var(--header-background);
-  --color-header-border: var(--header-border);
+  --color-canvas: var(--canvas);
+  --color-canvas-foreground: var(--canvas-foreground);
+
+  --color-header: var(--header);
   --color-header-foreground: var(--header-foreground);
   --color-header-action-hover: var(--header-action-hover);
   --color-notification-badge: var(--notification-badge);
@@ -277,6 +302,9 @@
 
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
 
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
@@ -316,6 +344,8 @@
   --animate-fade-out: nebari-fade-out var(--duration-base) var(--ease-standard) both;
   --animate-slide-up-fade: nebari-slide-up-fade var(--duration-base) var(--ease-emphasized) both;
   --animate-slide-down-fade: nebari-slide-down-fade var(--duration-base) var(--ease-emphasized) both;
+  --animate-skeleton-pulse: nebari-skeleton-pulse var(--duration-loading) var(--ease-standard)
+    infinite;
 }
 
 @layer base {
@@ -328,7 +358,7 @@
   }
 
   body {
-    @apply bg-body-background text-foreground;
+    @apply bg-canvas text-foreground;
   }
 
   html,
