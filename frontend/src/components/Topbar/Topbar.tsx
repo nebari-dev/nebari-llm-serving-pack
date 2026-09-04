@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { getAppConfig } from "@/app/config";
 import { signOut } from "@/auth/keycloak";
 import { useUser } from "@/auth/user";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@/components/Avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
