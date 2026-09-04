@@ -7,7 +7,7 @@ import { Topbar } from "@/components/Topbar";
 
 export default function App() {
   return (
-    <div className="min-h-screen bg-body-background text-foreground">
+    <div className="min-h-screen bg-canvas text-foreground">
       <Topbar />
 
       <main className="flex w-full flex-col gap-6 px-10 py-8">
