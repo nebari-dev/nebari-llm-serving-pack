@@ -43,6 +43,9 @@ import (
 
 // Condition types reported on PassthroughModel status.
 const (
+	// CondCredentialResolved reports whether the provider credential Secret
+	// exists and contains a non-empty apiKey entry.
+	CondCredentialResolved = "CredentialResolved"
 	// CondBackendConfigured covers the provider plumbing: Backend,
 	// BackendTLSPolicy, AIServiceBackend, BackendSecurityPolicy.
 	CondBackendConfigured = "BackendConfigured"
@@ -92,6 +95,12 @@ func (r *PassthroughModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
+	credentialCondition, err := resolvePassthroughCredential(ctx, r.Client, pm)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolving provider credential: %w", err)
+	}
+	conditions := []metav1.Condition{credentialCondition}
+
 	clientIDs, err := apiKeyClientIDs(ctx, r.Client, pm.Name, pm.Namespace)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reading api key client ids: %w", err)
@@ -110,7 +119,8 @@ func (r *PassthroughModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			Reason:  "BuildFailed",
 			Message: err.Error(),
 		}
-		if statusErr := r.updateStatus(ctx, log, pm, llmv1alpha1.PassthroughPhaseError, []metav1.Condition{buildCond}); statusErr != nil {
+		conditions = append(conditions, buildCond)
+		if statusErr := r.updateStatus(ctx, log, pm, llmv1alpha1.PassthroughPhaseError, conditions); statusErr != nil {
 			log.Error(statusErr, "failed to update status after build error")
 		}
 		return ctrl.Result{}, fmt.Errorf("building passthrough resources: %w", err)
@@ -131,8 +141,6 @@ func (r *PassthroughModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// whole reconcile. Unlike the LLMModel reconciler (which only logs and
 	// moves on), each failure is captured in a status condition and the
 	// reconcile is requeued so the resources are retried once the CRDs exist.
-	conditions := []metav1.Condition{}
-
 	backendErr := r.applyAll(ctx, log, pm,
 		resources.Backend,
 		resources.BackendTLSPolicy,
@@ -157,12 +165,7 @@ func (r *PassthroughModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		conditions = append(conditions, disabledCondition(CondInternalEndpointReady))
 	}
 
-	phase := llmv1alpha1.PassthroughPhaseReady
-	for _, c := range conditions {
-		if c.Status == metav1.ConditionFalse && c.Reason == "ApplyFailed" {
-			phase = llmv1alpha1.PassthroughPhaseError
-		}
-	}
+	phase := passthroughPhaseForConditions(conditions)
 
 	if err := r.updateStatus(ctx, log, pm, phase, conditions); err != nil {
 		return ctrl.Result{}, err
@@ -303,6 +306,15 @@ func disabledCondition(condType string) metav1.Condition {
 	}
 }
 
+func passthroughPhaseForConditions(conditions []metav1.Condition) llmv1alpha1.PassthroughModelPhase {
+	for _, condition := range conditions {
+		if condition.Status == metav1.ConditionFalse && condition.Reason == "ApplyFailed" {
+			return llmv1alpha1.PassthroughPhaseError
+		}
+	}
+	return llmv1alpha1.PassthroughPhaseReady
+}
+
 func (r *PassthroughModelReconciler) updateStatus(
 	ctx context.Context,
 	log controllerLogger,
@@ -348,6 +360,15 @@ func boolOrDefaultStatus(b *bool) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PassthroughModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&llmv1alpha1.PassthroughModel{},
+		passthroughCredentialSecretIndex,
+		indexPassthroughModelByCredentialSecret,
+	); err != nil {
+		return fmt.Errorf("indexing PassthroughModels by credential Secret: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&llmv1alpha1.PassthroughModel{}).
 		Watches(
@@ -356,6 +377,12 @@ func (r *PassthroughModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return enqueueAllModelsForAPIKeySecret(ctx, r.Client, obj, &llmv1alpha1.PassthroughModelList{})
 			}),
 			builder.WithPredicates(managedByOperatorPredicate()),
+		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				return enqueuePassthroughModelsForCredentialSecret(ctx, r.Client, obj)
+			}),
 		).
 		Named("passthroughmodel").
 		Complete(r)

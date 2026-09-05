@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -51,7 +52,7 @@ func newPassthroughModel(name, namespace string) *llmv1alpha1.PassthroughModel {
 				Hostname:             "openrouter.ai",
 				Port:                 443,
 				SchemaVersion:        "api/v1",
-				CredentialSecretName: "openrouter-api-key",
+				CredentialSecretName: name + "-provider-credential",
 			},
 			Models: llmv1alpha1.PassthroughModels{
 				CatchAll: true,
@@ -91,6 +92,11 @@ var _ = Describe("PassthroughModel Controller", func() {
 				r := newPassthroughReconciler()
 				_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: pmName, Namespace: "default"}})
 			}
+			credentialSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+				Name:      pmName + "-provider-credential",
+				Namespace: "default",
+			}}
+			_ = k8sClient.Delete(ctx, credentialSecret)
 		})
 
 		It("adds the finalizer and creates the api-keys Secret and metadata ConfigMap", func() {
@@ -157,6 +163,59 @@ var _ = Describe("PassthroughModel Controller", func() {
 			Expect(pm.Status.Endpoints.External).To(Equal("https://llm.example.com"))
 			Expect(pm.Status.Endpoints.Internal).To(Equal("https://llm-internal.example.com"))
 			Expect(pm.Status.ObservedGeneration).To(Equal(pm.Generation))
+		})
+
+		DescribeTable("reports unresolved provider credentials",
+			func(secretData map[string][]byte, expectedReason string) {
+				if secretData != nil {
+					credentialSecret := &corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      pmName + "-provider-credential",
+							Namespace: "default",
+						},
+						Data: secretData,
+					}
+					Expect(k8sClient.Create(ctx, credentialSecret)).To(Succeed())
+				}
+
+				r := newPassthroughReconciler()
+				req := reconcile.Request{NamespacedName: types.NamespacedName{Name: pmName, Namespace: "default"}}
+				_, err := r.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+
+				pm := &llmv1alpha1.PassthroughModel{}
+				Expect(k8sClient.Get(ctx, req.NamespacedName, pm)).To(Succeed())
+				condition := meta.FindStatusCondition(pm.Status.Conditions, "CredentialResolved")
+				Expect(condition).NotTo(BeNil())
+				Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(condition.Reason).To(Equal(expectedReason))
+			},
+			Entry("when the referenced Secret does not exist", nil, "SecretNotFound"),
+			Entry("when the Secret does not contain apiKey", map[string][]byte{}, "APIKeyMissing"),
+			Entry("when apiKey is empty", map[string][]byte{"apiKey": []byte("")}, "APIKeyMissing"),
+		)
+
+		It("reports a resolved provider credential", func() {
+			credentialSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pmName + "-provider-credential",
+					Namespace: "default",
+				},
+				Data: map[string][]byte{"apiKey": []byte("provider-key")},
+			}
+			Expect(k8sClient.Create(ctx, credentialSecret)).To(Succeed())
+
+			r := newPassthroughReconciler()
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: pmName, Namespace: "default"}}
+			_, err := r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			pm := &llmv1alpha1.PassthroughModel{}
+			Expect(k8sClient.Get(ctx, req.NamespacedName, pm)).To(Succeed())
+			condition := meta.FindStatusCondition(pm.Status.Conditions, "CredentialResolved")
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+			Expect(condition.Reason).To(Equal("Resolved"))
 		})
 
 		It("cleans up the Secret and ConfigMap on deletion", func() {
