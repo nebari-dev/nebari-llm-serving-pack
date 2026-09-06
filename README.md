@@ -202,7 +202,7 @@ response = client.chat.completions.create(
 | `auth.oidc.groupsClaim` | JWT claim containing group memberships | `groups` |
 | `auth.oidc.audience` | Expected JWT audience (empty = no audience check) | `""` |
 | `defaults.serving.image` | Default vLLM serving image | `ghcr.io/llm-d/llm-d-cuda:v0.7.0` |
-| `defaults.epp.image` | Endpoint Picker (llm-d-inference-scheduler) image | `ghcr.io/llm-d/llm-d-inference-scheduler:v0.8.0` |
+| `defaults.epp.image` | llm-d-router Endpoint Picker image | `ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0` |
 | `defaults.storage.storageClassName` | Default StorageClass for model PVCs (empty = cluster default) | `""` |
 | `defaults.monitoring.enabled` | Enable PodMonitor for Prometheus scraping | `true` |
 | `keyManager.enabled` | Deploy the key manager API service | `true` |

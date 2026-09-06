@@ -1,7 +1,7 @@
 // Resource specs based on GIE inferencepool chart v1.5.0 and the EPP deployment
-// template from llm-d-inference-scheduler v0.8.0 (llm-d release v0.7.0).
-// The InferencePool API (inference.networking.k8s.io/v1) and the
-// EndpointPickerConfig schema are unchanged from v1.4.0/v0.6.1-rc.1.
+// template from llm-d-router-endpoint-picker v0.9.0.
+// The InferencePool uses inference.networking.k8s.io/v1; the EPP config uses
+// llm-d.ai/v1alpha1, the non-deprecated API accepted by llm-d-router v0.9.0.
 package reconcilers
 
 import (
@@ -32,7 +32,7 @@ const (
 // Without an explicit config, the GIE falls back to a default that includes
 // prefix-cache-scorer, which requires a tokenizer (sidecar or HF_TOKEN) we don't
 // ship. This config uses only built-in plugins that don't require tokenization.
-const eppDefaultConfig = `apiVersion: inference.networking.x-k8s.io/v1alpha1
+const eppDefaultConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: max-score-picker

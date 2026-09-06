@@ -259,11 +259,10 @@ defaults:
     # requirements).
     image: ghcr.io/llm-d/llm-d-cuda:v0.7.0
   epp:
-    # llm-d-inference-scheduler (Endpoint Picker) image, used for every
-    # model's EPP Deployment. Pinned to the same llm-d v0.7.0 release as the
-    # serving image. Override to re-pin without rebuilding the operator, e.g.
-    # to point at a mirrored/air-gapped registry.
-    image: ghcr.io/llm-d/llm-d-inference-scheduler:v0.8.0
+    # llm-d-router Endpoint Picker image, used for every model's EPP
+    # Deployment. Override to re-pin without rebuilding the operator, e.g. to
+    # point at a mirrored or air-gapped registry.
+    image: ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0
   storage:
     storageClassName: ""
   monitoring:
